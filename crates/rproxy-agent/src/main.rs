@@ -2,9 +2,12 @@
 //!
 //! Connects outbound to the proxy server via WebSocket, authenticates,
 //! then accepts yamux streams and relays each one to the requested target.
+//!
+//! Reconnects automatically with exponential backoff on any failure.
 
 use anyhow::Result;
 use clap::Parser;
+use std::time::Duration;
 use tracing::info;
 
 mod config;
@@ -25,10 +28,22 @@ async fn main() -> Result<()> {
     info!("starting rproxy-agent");
     info!("  server = {}", cfg.server_url);
 
+    // Exponential backoff: 1s → 2s → 4s → ... capped at 60s.
+    let mut backoff = Duration::from_secs(1);
     loop {
-        if let Err(e) = tunnel::run(&cfg).await {
-            tracing::warn!("tunnel error: {:#}; reconnecting in 5s", e);
+        match tunnel::run(&cfg).await {
+            Ok(()) => {
+                tracing::info!("tunnel closed cleanly; reconnecting in {}s", backoff.as_secs());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "tunnel error: {:#}; reconnecting in {}s",
+                    e,
+                    backoff.as_secs()
+                );
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(60));
     }
 }
