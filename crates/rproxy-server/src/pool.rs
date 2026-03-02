@@ -1,12 +1,13 @@
 //! Provider connection pool.
 //!
-//! Each provider is represented by a [`ProviderHandle`] that communicates
-//! with a dedicated "driver" task that owns the yamux Connection.
-//! Opening a new stream sends a request over a channel; the driver task
-//! fulfills it via `Connection::poll_new_outbound`.
+//! Each provider is represented by a [`ProviderHandle`] backed by a dedicated
+//! yamux driver task.  Opening a stream sends a request over an unbounded
+//! channel; the driver task fulfills it via `Connection::poll_new_outbound`.
+//!
+//! Selection strategy: round-robin across all live providers.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -16,12 +17,14 @@ use yamux::Stream;
 
 pub type OpenReply = oneshot::Sender<Result<Stream>>;
 
-/// Handle to a live provider connection.
+/// Handle to a single live provider connection.
 pub struct ProviderHandle {
     pub id: Uuid,
     pub label: Option<String>,
     pub geo: Option<String>,
-    /// Channel to the driver task that owns the yamux Connection.
+    /// In-flight stream count (for load awareness / debugging).
+    active_streams: Arc<AtomicU64>,
+    /// Sender to the driver task.
     open_tx: mpsc::UnboundedSender<OpenReply>,
 }
 
@@ -32,7 +35,13 @@ impl ProviderHandle {
         geo: Option<String>,
         open_tx: mpsc::UnboundedSender<OpenReply>,
     ) -> Arc<Self> {
-        Arc::new(Self { id, label, geo, open_tx })
+        Arc::new(Self {
+            id,
+            label,
+            geo,
+            active_streams: Arc::new(AtomicU64::new(0)),
+            open_tx,
+        })
     }
 
     /// Open a new proxy stream toward this provider.
@@ -41,8 +50,20 @@ impl ProviderHandle {
         self.open_tx
             .send(tx)
             .map_err(|_| anyhow::anyhow!("provider {} disconnected", self.id))?;
-        rx.await
-            .map_err(|_| anyhow::anyhow!("provider {} driver dropped reply", self.id))?
+        let stream = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("provider {} driver dropped reply", self.id))??;
+        self.active_streams.fetch_add(1, Ordering::Relaxed);
+        Ok(stream)
+    }
+
+    pub fn active_streams(&self) -> u64 {
+        self.active_streams.load(Ordering::Relaxed)
+    }
+
+    /// Decrement the active stream count (called when a stream finishes).
+    pub fn stream_done(&self) {
+        self.active_streams.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -76,8 +97,7 @@ impl ProviderPool {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.providers.len()
     }
 

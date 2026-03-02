@@ -93,6 +93,7 @@ async fn handle_client(stream: TcpStream, pool: Arc<ProviderPool>) -> Result<()>
             .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             .await
             .ok();
+        provider.stream_done();
         return Err(e);
     }
 
@@ -100,7 +101,9 @@ async fn handle_client(stream: TcpStream, pool: Arc<ProviderPool>) -> Result<()>
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
 
-    tokio::io::copy_bidirectional(&mut stream, &mut tunnel).await?;
+    let result = tokio::io::copy_bidirectional(&mut stream, &mut tunnel).await;
+    provider.stream_done();
+    result?;
     Ok(())
 }
 

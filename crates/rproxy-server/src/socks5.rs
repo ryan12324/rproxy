@@ -27,7 +27,8 @@ pub async fn serve(addr: String, pool: Arc<ProviderPool>) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!("socks5 listener on {}", addr);
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
+        tracing::debug!(%peer, "socks5 client");
         let pool = pool.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(stream, pool).await {
@@ -54,11 +55,9 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<ProviderPool>) -> Result
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await?;
     let [ver, cmd, _rsv, atyp] = header;
-
     if ver != SOCKS5_VERSION {
         anyhow::bail!("bad version in request: {}", ver);
     }
-
     if cmd != CMD_CONNECT {
         send_socks5_reply(&mut stream, REP_CMD_NOT_SUPPORTED).await.ok();
         anyhow::bail!("unsupported SOCKS5 command: {}", cmd);
@@ -68,14 +67,12 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<ProviderPool>) -> Result
         ATYP_IPV4 => {
             let mut buf = [0u8; 4];
             stream.read_exact(&mut buf).await?;
-            let port = stream.read_u16().await?;
-            ProxyAddr::Ipv4(Ipv4Addr::from(buf), port)
+            ProxyAddr::Ipv4(Ipv4Addr::from(buf), stream.read_u16().await?)
         }
         ATYP_IPV6 => {
             let mut buf = [0u8; 16];
             stream.read_exact(&mut buf).await?;
-            let port = stream.read_u16().await?;
-            ProxyAddr::Ipv6(Ipv6Addr::from(buf), port)
+            ProxyAddr::Ipv6(Ipv6Addr::from(buf), stream.read_u16().await?)
         }
         ATYP_DOMAIN => {
             let len = stream.read_u8().await? as usize;
@@ -95,7 +92,6 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<ProviderPool>) -> Result
 
     tracing::debug!(%target, "SOCKS5 CONNECT");
 
-    // Pick provider and open yamux stream.
     let provider = match pool.pick() {
         Ok(p) => p,
         Err(e) => {
@@ -112,19 +108,20 @@ async fn handle_client(mut stream: TcpStream, pool: Arc<ProviderPool>) -> Result
         }
     };
 
-    // yamux::Stream implements futures::AsyncRead/AsyncWrite; bridge to tokio.
     let mut tunnel = yamux_stream.compat();
-
     write_proxy_request(&mut tunnel, &target).await?;
 
     if let Err(e) = read_proxy_response(&mut tunnel).await {
         send_socks5_reply(&mut stream, REP_GENERAL_FAILURE).await.ok();
+        provider.stream_done();
         return Err(e);
     }
 
     send_socks5_reply(&mut stream, REP_SUCCESS).await?;
 
-    tokio::io::copy_bidirectional(&mut stream, &mut tunnel).await?;
+    let result = tokio::io::copy_bidirectional(&mut stream, &mut tunnel).await;
+    provider.stream_done();
+    result?;
     Ok(())
 }
 
