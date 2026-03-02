@@ -1,0 +1,54 @@
+[workspace]
+members = [
+    "crates/rproxy-proto",
+    "crates/rproxy-server",
+    "crates/rproxy-agent",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ryan Johnson <ryan@rjhome.uk>"]
+license = "MIT"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat", "io"] }
+futures-util = "0.3"
+
+# websocket
+tokio-tungstenite = "0.24"
+tungstenite = "0.24"
+
+# multiplexing
+yamux = "0.13"
+
+# tls
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+
+# types
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# concurrency
+dashmap = "6"
+
+# cli & config
+clap = { version = "4", features = ["derive", "env"] }
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# error handling
+anyhow = "1"
+thiserror = "1"
+
+# internal
+rproxy-proto = { path = "crates/rproxy-proto" }
